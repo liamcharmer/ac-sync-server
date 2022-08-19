@@ -4,6 +4,7 @@ var createError = require("http-errors");
 var express = require("express");
 var path = require("path");
 var cookieParser = require("cookie-parser");
+var multer = require("multer");
 var logger = require("morgan");
 const fs = require("fs-extra");
 const chokidar = require("chokidar");
@@ -115,23 +116,28 @@ global.watcher = chokidar
   .on("all", (event, path) => {
     let dataType = path.split("/")[0];
     if (serverInit) {
+      console.log(path);
       let folderName = path.split("/")[1];
-      if (event == "addDir" && path.split("/").length - 1 == 1) {
-        console.log(`New Directory Added ${dataType}/${folderName}`);
-        if (dataType == "cars") {
-          carUpload(folderName);
+      if (!folderName.includes(".")) {
+        if (event == "addDir" && path.split("/").length - 1 == 1) {
+          console.log(`New Directory Added ${dataType}/${folderName}`);
+          setTimeout(() => {
+            if (dataType == "cars") {
+              carUpload(folderName);
+            }
+            if (dataType == "tracks") {
+              trackUpload(folderName);
+            }
+          }, 10000);
         }
-        if (dataType == "tracks") {
-          trackUpload(folderName);
-        }
-      }
-      if (event == "unlinkDir") {
-        console.log(event, path);
-        if (dataType == "cars") {
-          carRemove(folderName);
-        }
-        if (dataType == "tracks") {
-          trackRemove(folderName);
+        if (event == "unlinkDir") {
+          console.log(event, path);
+          if (dataType == "cars") {
+            carRemove(folderName);
+          }
+          if (dataType == "tracks") {
+            trackRemove(folderName);
+          }
         }
       }
     }
@@ -260,7 +266,6 @@ function getDirectories(path) {
     return fs.statSync(path + "/" + file).isDirectory();
   });
 }
-var usersRouter = require("./routes/users");
 const e = require("express");
 
 var app = express();
@@ -273,7 +278,21 @@ app.use(express.urlencoded({ extended: false }));
 app.use(cookieParser());
 app.use(express.static(path.join(__dirname, "public")));
 
-app.use("/", usersRouter);
+if (!fs.existsSync(`${serverDir}/content/uploads`)) {
+  fs.mkdirSync(`${serverDir}/content/uploads`);
+}
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, `${serverDir}/content/uploads`);
+  },
+  filename: function (req, file, cb) {
+    cb(null, file.originalname);
+  },
+});
+app.use(multer({ storage: storage }).single("file"));
+var uploadRouter = require("./routes/upload");
+
+app.use("/upload", uploadRouter);
 
 // catch 404 and forward to error handler
 app.use(function (req, res, next) {
