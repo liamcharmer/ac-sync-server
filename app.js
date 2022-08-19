@@ -6,7 +6,11 @@ var path = require("path");
 var cookieParser = require("cookie-parser");
 var logger = require("morgan");
 const fs = require("fs-extra");
-
+const chokidar = require("chokidar");
+const serverDir = process.env.ACSERVER_DIR
+  ? process.env.ACSERVER_DIR
+  : "../serverfiles";
+let serverInit = false;
 const supabase = require("@supabase/supabase-js");
 
 const database = supabase.createClient(
@@ -15,42 +19,148 @@ const database = supabase.createClient(
 );
 
 let serverId = null;
-
 database
-  .from("race_server")
+  .from("race_server_tokens")
   .select()
   .eq("server_token", process.env.SERVER_TOKEN)
   .then(async ({ data }) => {
-    let extIP = require("ext-ip")();
-    let externalIp = await extIP.get();
-    const serverData = {
-      server_name: process.env.SERVER_NAME,
-      server_description: process.env.SERVER_DESCRIPTION,
-      server_port: process.env.SERVER_PORT,
-      server_token: process.env.SERVER_TOKEN,
-      server_ip: externalIp,
-    };
-    if (data.length > 0) {
-      serverData.id = data[0].id;
-    }
+    if (data && data.length > 0) {
+      let serverTokenData = data[0];
+      let extIP = require("ext-ip")();
+      let externalIp = await extIP.get();
+      const serverData = {
+        server_name: process.env.SERVER_NAME,
+        server_description: process.env.SERVER_DESCRIPTION,
+        server_port: process.env.SERVER_PORT,
+        server_ip: externalIp,
+      };
+      if (!serverTokenData.server_id) {
+        console.log("No server id");
+        const insertInfo = await database
+          .from("race_server")
+          .insert([serverData]);
+        serverId = insertInfo.data[0].id;
+        const serverTokenInfo = await database
+          .from("race_server_tokens")
+          .update({ server_id: serverId })
+          .match({ id: data[0].id });
+        console.log(serverTokenInfo);
+      } else {
+        serverId = serverTokenData.server_id;
+        serverData.id = serverId;
+        const insertInfo = await database
+          .from("race_server")
+          .upsert([serverData]);
+      }
 
-    const insertInfo = await database.from("race_server").upsert([serverData]);
-    serverId = insertInfo.data[0].id;
-    let cars = await getDirectories("../serverfiles/content/cars");
-    for (let c = 0; c < cars.length; c++) {
-      let car = cars[c];
-      carUpload(car);
-    }
-    let tracks = await getDirectories("../serverfiles/content/tracks");
-    for (let c = 0; c < tracks.length; c++) {
-      let track = tracks[c];
-      trackUpload(track);
+      data.server_id = serverId;
+      const serverTokenInsert = await database
+        .from("race_server_tokens")
+        .upsert([data]);
+      serverInit = true;
+      let cars = await getDirectories(`${serverDir}/content/cars`);
+      for (let c = 0; c < cars.length; c++) {
+        let car = cars[c];
+        carUpload(car, false);
+      }
+      let tracks = await getDirectories(`${serverDir}/content/tracks`);
+      for (let c = 0; c < tracks.length; c++) {
+        let track = tracks[c];
+        trackUpload(track);
+      }
+    } else {
+      console.log("There is no generated server token");
     }
   });
+
+database
+  .from("race_cars")
+  .on("DELETE", (payload) => {
+    if (payload.eventType == "DELETE") {
+      // Need to delete file from server
+      let oldData = payload.old;
+      fs.rmSync(`${serverDir}/content/cars/${oldData.friendly_id}`, {
+        recursive: true,
+        force: true,
+      });
+
+      console.log(`Deleted Car: ${oldData.friendly_id} from file system`);
+    }
+  })
+  .subscribe();
+
+database
+  .from("race_tracks")
+  .on("DELETE", (payload) => {
+    if (payload.eventType == "DELETE") {
+      // Need to delete file from server
+      let oldData = payload.old;
+      fs.rmSync(`${serverDir}/content/tracks/${oldData.friendly_id}`, {
+        recursive: true,
+        force: true,
+      });
+      console.log(`Deleted Track: ${oldData.friendly_id} from file system`);
+    }
+  })
+  .subscribe();
+
+global.watcher = chokidar
+  .watch(`.`, {
+    persistent: true,
+    cwd: `${serverDir}/content`,
+    // followSymlinks: false,
+    // useFsEvents: false,
+    // usePolling: false,
+  })
+  .on("all", (event, path) => {
+    let dataType = path.split("/")[0];
+    if (serverInit) {
+      let folderName = path.split("/")[1];
+      if (event == "addDir" && path.split("/").length - 1 == 1) {
+        console.log(`New Directory Added ${dataType}/${folderName}`);
+        if (dataType == "cars") {
+          carUpload(folderName);
+        }
+        if (dataType == "tracks") {
+          trackUpload(folderName);
+        }
+      }
+      if (event == "unlinkDir") {
+        console.log(event, path);
+        if (dataType == "cars") {
+          carRemove(folderName);
+        }
+        if (dataType == "tracks") {
+          trackRemove(folderName);
+        }
+      }
+    }
+  })
+  .on("ready", () => {
+    console.log("Ready");
+  });
+//.on('raw', console.log.bind(console, 'Raw event:'))
+
+async function trackRemove(track, logs = false) {
+  database
+    .from("race_tracks")
+    .delete()
+    .match({ server_id: serverId, friendly_id: track })
+    .then(async ({ data }) => {
+      if (logs) console.log(`${car} removed`);
+    });
+}
 async function trackUpload(track) {
   let trackInfo = {};
   trackInfo.friendly_id = track;
   trackInfo.server_id = serverId;
+  let trackVersions = await getDirectories(
+    `${serverDir}/content/tracks/${track}/`
+  );
+  if (trackVersions.length > 1) {
+    trackInfo.versions = trackVersions;
+  }
+
   database
     .from("race_tracks")
     .select()
@@ -63,25 +173,47 @@ async function trackUpload(track) {
       }
     });
 }
-async function carUpload(car) {
-  let carInfo = {};
 
-  if (fs.existsSync(`../serverfiles/content/cars/${car}/ui/ui_car.json`)) {
+async function carRemove(car, logs = false) {
+  database
+    .from("race_cars")
+    .delete()
+    .match({ server_id: serverId, friendly_id: car })
+    .then(async ({ data }) => {
+      if (logs) console.log(`${car} removed`);
+    });
+}
+async function carUpload(car, logs = false) {
+  let carInfo = {};
+  if (logs) console.log(`==========CAR UPLOAD==========`);
+  if (logs) console.log(`Car: ${car}`);
+  if (fs.existsSync(`${serverDir}/content/cars/${car}/ui/ui_car.json`)) {
+    if (logs) console.log(`${car} has ui_car.json`);
     // ...
-    carInfo = {
-      ...(await fs.readJson(
-        `../serverfiles/content/cars/${car}/ui/ui_car.json`
-      )),
-    };
+    let jsonData = await fs.readJson(
+      `${serverDir}/content/cars/${car}/ui/ui_car.json`
+    );
+    carInfo.name = jsonData.name;
+    carInfo.description = jsonData.description;
+    carInfo.brand = jsonData.brand;
+    carInfo.tags = jsonData.tags;
+    carInfo.specs = jsonData.specs;
+    carInfo.country = jsonData.country;
+    carInfo.year = jsonData.year;
+    carInfo.version = jsonData.version;
+    carInfo.class = jsonData.class;
+    carInfo.skins = jsonData.skins;
+    carInfo.powerCurve = jsonData.powerCurve;
+    carInfo.torqueCurve = jsonData.torqueCurve;
+    carInfo.author = jsonData.author;
   }
   carInfo.friendly_id = car;
   carInfo.server_id = serverId;
 
-  if (carInfo.url) delete carInfo.url;
-
-  if (fs.existsSync(`../serverfiles/content/cars/${car}/skins/`)) {
+  if (fs.existsSync(`${serverDir}/content/cars/${car}/skins/`)) {
+    if (logs) console.log(`${car} has skins`);
     carInfo.skins = await getDirectories(
-      `../serverfiles/content/cars/${car}/skins/`
+      `${serverDir}/content/cars/${car}/skins/`
     );
   }
 
@@ -91,29 +223,34 @@ async function carUpload(car) {
     .match({ server_id: serverId, friendly_id: car })
     .then(async ({ data }) => {
       if (data.length == 0) {
+        if (logs) console.log(`${car} Uploading`);
         const insertCarInfo = await database
           .from("race_cars")
           .upsert([carInfo]);
-        if (fs.existsSync(`../serverfiles/content/cars/${car}/ui/badge.png`)) {
+        if (logs) console.log("Insert Error: ", insertCarInfo.error);
+        if (fs.existsSync(`${serverDir}/content/cars/${car}/ui/badge.png`)) {
+          if (logs) console.log(`${car} has a badge`);
           try {
             const fileContent = fs.readFileSync(
-              `../serverfiles/content/cars/${car}/ui/badge.png`
+              `${serverDir}/content/cars/${car}/ui/badge.png`
             );
             let fileName = `${Math.random()}.png`;
             if (carInfo.brand) {
               fileName = `${carInfo.brand.toLowerCase()}.png`;
             }
             const filePath = `${fileName}`;
-            console.log(filePath);
+            if (logs) console.log(filePath);
             let { error: uploadError } = await database.storage
               .from("car-badges")
               .upload(filePath, fileContent);
             if (uploadError) throw uploadError;
-            console.log("uploaded");
+            if (logs) console.log("uploaded");
           } catch (e) {
-            console.log(e);
+            if (logs) console.log(e);
           }
         }
+      } else {
+        if (logs) console.log(`${car} already exists in database`);
       }
     });
 }
