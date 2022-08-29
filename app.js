@@ -118,7 +118,7 @@ global.watcher = chokidar
     if (serverInit) {
       console.log(path);
       let folderName = path.split("/")[1];
-      if (!folderName.includes(".")) {
+      if (folderName && !folderName.includes(".")) {
         if (event == "addDir" && path.split("/").length - 1 == 1) {
           console.log(`New Directory Added ${dataType}/${folderName}`);
           setTimeout(() => {
@@ -150,18 +150,66 @@ global.watcher = chokidar
 async function trackRemove(track, logs = false) {
   database
     .from("race_tracks")
-    .delete()
+    .select()
     .match({ server_id: serverId, friendly_id: track })
     .then(async ({ data }) => {
-      if (logs) console.log(`${car} removed`);
+      let track = data[0];
+      if (track.main_track) {
+        console.log(`${car} has main track ${track.main_track}`);
+        await database
+          .from("race_tracks")
+          .delete()
+          .match({ server_id: serverId, id: track.main_track })
+          .then(async ({ data, error }) => {
+            if (logs) console.log(`${car} main track removed`);
+          });
+      }
+      await database
+        .from("race_tracks")
+        .delete()
+        .match({ server_id: serverId, main_track: track.id })
+        .then(async ({ data, error }) => {
+          if (logs) console.log(`${car} subs via the main_track removed`);
+          database
+            .from("race_tracks")
+            .delete()
+            .match({ server_id: serverId, friendly_id: track.friendly_id })
+            .then(async ({ data }) => {
+              if (logs) console.log(`${car} removed finally`);
+            });
+        });
     });
 }
-async function trackUpload(track) {
+async function trackUpload(track, logs = true) {
   let trackInfo = {};
   trackInfo.friendly_id = track;
+  trackInfo.name = titleCase(nameifyString(track));
   trackInfo.server_id = serverId;
+  if (fs.existsSync(`${serverDir}/content/tracks/${track}/ui/ui_track.json`)) {
+    if (logs) console.log(`${track} has ui_track.json`);
+    // ...
+    let jsonData = await fs.readJson(
+      `${serverDir}/content/tracks/${track}/ui/ui_track.json`
+    );
+    trackInfo.name = jsonData.name;
+    trackInfo.description = jsonData.description;
+    trackInfo.tags = jsonData.tags;
+    trackInfo.country = jsonData.country;
+    trackInfo.version = jsonData.version;
+    trackInfo.author = jsonData.author;
+    trackInfo.city = jsonData.city;
+    trackInfo.length = jsonData.length;
+    trackInfo.width = jsonData.width;
+    trackInfo.pitboxes = jsonData.pixboxes;
+    trackInfo.run = jsonData.run;
+    trackInfo.geotags = jsonData.geotags;
+  }
+
   let trackVersions = await getDirectories(
     `${serverDir}/content/tracks/${track}/`
+  );
+  trackVersions = trackVersions.filter(
+    (e) => e !== "ui" && e !== "skins" && e !== "data" && e !== "ai"
   );
   if (trackVersions.length > 1) {
     trackInfo.versions = trackVersions;
@@ -172,10 +220,159 @@ async function trackUpload(track) {
     .select()
     .match({ server_id: serverId, friendly_id: track })
     .then(async ({ data }) => {
-      if (data.length == 0) {
+      if (data && data.length == 0) {
         const insertTrackInfo = await database
           .from("race_tracks")
           .upsert([trackInfo]);
+        if (
+          fs.existsSync(`${serverDir}/content/tracks/${track}/ui/outline.png`)
+        ) {
+          if (logs) console.log(`${track} has a map outline`);
+          try {
+            const fileContent = fs.readFileSync(
+              `${serverDir}/content/tracks/${track}/ui/outline.png`
+            );
+            let fileName = `${Math.random()}.png`;
+            if (trackInfo.friendly_id) {
+              fileName = `${trackInfo.friendly_id.toLowerCase()}-outline.png`;
+            }
+            const filePath = `${fileName}`;
+            if (logs) console.log(filePath);
+            let { error: uploadError } = await database.storage
+              .from("map-outlines")
+              .upload(filePath, fileContent);
+            if (uploadError) throw uploadError;
+            if (logs) console.log("uploaded outline");
+          } catch (e) {
+            if (logs) console.log(e);
+          }
+        }
+        if (
+          fs.existsSync(`${serverDir}/content/tracks/${track}/ui/preview.png`)
+        ) {
+          if (logs) console.log(`${track} has a map preview`);
+          try {
+            const previewContent = fs.readFileSync(
+              `${serverDir}/content/tracks/${track}/ui/preview.png`
+            );
+            let previewFileName = `${Math.random()}.png`;
+            if (trackInfo.friendly_id) {
+              previewFileName = `${trackInfo.friendly_id.toLowerCase()}-preview.png`;
+            }
+            const previewPath = `${previewFileName}`;
+            if (logs) console.log(previewPath);
+            let { error: uploadError } = await database.storage
+              .from("map-previews")
+              .upload(previewPath, previewContent);
+            if (uploadError) throw uploadError;
+            if (logs) console.log("uploaded preview");
+          } catch (e) {
+            if (logs) console.log(e);
+          }
+        }
+        if (trackVersions.length > 1) {
+          console.log(`${track} has more versions`);
+          for (let c = 0; c < trackVersions.length; c++) {
+            let subTrackInfo = {};
+
+            subTrackInfo.server_id = serverId;
+            let variation = trackVersions[c];
+            if (
+              fs.existsSync(
+                `${serverDir}/content/tracks/${track}/ui/${variation}/ui_track.json`
+              )
+            ) {
+              if (logs) console.log(`${track} ${variation}has ui_track.json`);
+              // ...
+              let variationJsonData = await fs.readJson(
+                `${serverDir}/content/tracks/${track}/ui/${variation}/ui_track.json`
+              );
+              subTrackInfo.friendly_id = variation;
+              subTrackInfo.name = variationJsonData.name;
+              subTrackInfo.description = variationJsonData.description;
+              subTrackInfo.tags = variationJsonData.tags;
+              subTrackInfo.country = variationJsonData.country;
+              subTrackInfo.version = variationJsonData.version;
+              subTrackInfo.author = variationJsonData.author;
+              subTrackInfo.city = variationJsonData.city;
+              subTrackInfo.length = variationJsonData.length;
+              subTrackInfo.width = variationJsonData.width;
+              subTrackInfo.pitboxes = variationJsonData.pixboxes;
+              subTrackInfo.run = variationJsonData.run;
+              subTrackInfo.geotags = variationJsonData.geotags;
+              subTrackInfo.main_track = insertTrackInfo.data[0].id;
+              console.log(subTrackInfo);
+              database
+                .from("race_tracks")
+                .select()
+                .match({
+                  server_id: serverId,
+                  friendly_id: variation,
+                  main_track: insertTrackInfo.data[0].id,
+                })
+                .then(async ({ data }) => {
+                  console.log("Hopefully we did the check");
+                  console.log(data);
+                  if (data && data.length == 0) {
+                    const insertSubTrack = await database
+                      .from("race_tracks")
+                      .upsert([subTrackInfo]);
+                    if (
+                      fs.existsSync(
+                        `${serverDir}/content/tracks/${track}/ui/${variation}/outline.png`
+                      )
+                    ) {
+                      if (logs)
+                        console.log(`${track} ${variation} has a map outline`);
+                      try {
+                        const fileContent = fs.readFileSync(
+                          `${serverDir}/content/tracks/${track}/ui/${variation}/outline.png`
+                        );
+                        let fileName = `${Math.random()}.png`;
+                        if (subTrackInfo.friendly_id) {
+                          fileName = `${trackInfo.friendly_id.toLowerCase()}-${subTrackInfo.friendly_id.toLowerCase()}-outline.png`;
+                        }
+                        const filePath = `${fileName}`;
+                        if (logs) console.log(filePath);
+                        let { error: uploadError } = await database.storage
+                          .from("map-outlines")
+                          .upload(filePath, fileContent);
+                        if (uploadError) throw uploadError;
+                        if (logs) console.log("uploaded outline");
+                      } catch (e) {
+                        if (logs) console.log(e);
+                      }
+                    }
+                    if (
+                      fs.existsSync(
+                        `${serverDir}/content/tracks/${track}/ui/${variation}/preview.png`
+                      )
+                    ) {
+                      if (logs) console.log(`${track} has a map preview`);
+                      try {
+                        const previewContent = fs.readFileSync(
+                          `${serverDir}/content/tracks/${track}/ui/${variation}/preview.png`
+                        );
+                        let previewFileName = `${Math.random()}.png`;
+                        if (subTrackInfo.friendly_id) {
+                          previewFileName = `${trackInfo.friendly_id.toLowerCase()}-${subTrackInfo.friendly_id.toLowerCase()}-preview.png`;
+                        }
+                        const previewPath = `${previewFileName}`;
+                        if (logs) console.log(previewPath);
+                        let { error: uploadError } = await database.storage
+                          .from("map-previews")
+                          .upload(previewPath, previewContent);
+                        if (uploadError) throw uploadError;
+                        if (logs) console.log("uploaded preview");
+                      } catch (e) {
+                        if (logs) console.log(e);
+                      }
+                    }
+                  }
+                });
+            }
+          }
+        }
       }
     });
 }
@@ -259,6 +456,13 @@ async function carUpload(car, logs = false) {
         if (logs) console.log(`${car} already exists in database`);
       }
     });
+}
+
+function nameifyString(string) {
+  return string.replace(/_/g, " ");
+}
+function titleCase(str) {
+  return str.replace(/(^\w|\s\w)/g, (m) => m.toUpperCase());
 }
 
 function getDirectories(path) {
